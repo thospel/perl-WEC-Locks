@@ -1,0 +1,108 @@
+#!/usr/bin/perl -w
+use strict;
+use Data::Dumper;
+$Data::Dumper::Indent = 1;
+BEGIN {
+    use FindBin;
+    my $lib = $FindBin::Bin;
+    require lib;
+    "lib"->import("$lib/lib");
+}
+
+use WEC qw(api=1 loop Locks::LocalClient);
+use WEC::Locks::Constants qw(LOCAL_PORT);
+
+our $VERSION = "0.01";
+
+my $wait = 0;
+
+my $local_server = "unix://" . LOCAL_PORT;
+
+WEC->init;
+
+my $clients = WEC::Locks::LocalClient->new
+    (Greeting		=> \&greeting,
+     LockAcquired	=> \&lock_acquired,
+     Quit		=> \&quit,
+     Terminate		=> \&terminate,
+     );
+my $client = $clients->connect($local_server);
+
+loop();
+
+sub greeting {
+    my ($client) = @_;
+    print STDERR "Greeted\n";
+    my $try  = [
+		# ["alock"],
+		# ["alock", "name"],
+		["lock", "/name"],
+		["lock", "//foo//cd/"],
+		["alock", "/name", undef, 3],
+		# ["alock", "/name", "C:", 8, 7],
+		["alock", "/name", "C:", 8, 9],
+		["alock", "/name", "C:", 8],
+		["alock", "/name", "C:", 8, "infinity"],
+		# ["alock", "/name", "C:", "infinity", "infinity"],
+		["alock", "/name", "C:", 18],
+		["alock", "/name", "C:", 11, 14],
+		["alock", "/name", "C:", 15, 17],
+		["alock", "/name", "C:", 8, 8],
+		["alock", "/name", "C:", 3, 4],
+		["alock", "/name", "C:", 6, 7],
+		["alock", "/name", "C:", 5, 5],
+		["unlock", "/name", undef, 3, 18],
+		["unlock", "/name", undef, 25, 82],
+		["unlock", "/name", undef, 17, 26],
+		];
+    my $try1  = [
+		 ["try_lock", "/name"],
+		 ["try_alock", "/name", undef, 3],
+		 ["unalock", "/name", undef, 3],
+		 ["unlock", "/name", undef, 3, 18],
+		 ["unlock", "/name", undef, 25, 82],
+		 ["unlock", "/name", undef, 17, 26],
+		 ["unlock", "/name", undef, 1],
+		 ["quit"],
+		];
+    do_next($try1);
+}
+
+sub do_next {
+    my $try = shift;
+    while (my $t = shift @$try) {
+	my $command = shift @$t;
+	eval { $client->$command(filename => $t->[0],
+				 realm	  => $t->[1],
+				 from	  => $t->[2],
+				 to	  => $t->[3],
+				 callback => \&result) };
+	if (!$@) {
+	    next if !$wait;
+	    WEC->add_alarm($wait, sub { do_next($try) });
+	    return;
+	}
+	print STDERR "Failed $command [@$t]: $@";
+    }
+}
+
+sub lock_acquired {
+    my $connection = shift;
+    print STDERR "Acquired @_\n";
+}
+
+sub quit {
+    my $connection = shift;
+    print STDERR "Quit @_\n";
+}
+
+sub terminate {
+    my $connection = shift;
+    print STDERR "Terminate @_\n";
+}
+
+sub result {
+    my $connection = shift;
+    # print STDERR "result\n";
+    # print STDERR Dumper(\@_);
+}

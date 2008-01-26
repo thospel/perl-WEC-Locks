@@ -1,0 +1,456 @@
+#!/usr/bin/perl -w
+use strict;
+use Data::Dumper;
+$Data::Dumper::Indent = 1;
+BEGIN {
+    use FindBin;
+    my $lib = $FindBin::Bin;
+    $lib =~ s![^/]+/?\z!lib! ||
+	die "Could not find a directory component in '$FindBin::Bin'";
+    require lib;
+    "lib"->import($lib);
+}
+
+use WEC qw(api=1 loop Locks::RemoteServer);
+use WEC::Locks::Constants qw(REMOTE_PORT REMOTE_M_PORT INFINITY
+			     :response_types :lock_types);
+use WEC::Socket qw(inet);
+
+our $VERSION = "0.01";
+
+use constant {
+    # indices on a remote locks element
+    R_ID	=> 0,
+    R_FROM	=> 1,
+    R_TO	=> 2,
+    R_QUEUED	=> 3,
+    R_ATOMIC	=> 4,
+
+    # indices on a queued entry
+    Q_SEQ_ID	=> 0,
+    Q_ATOMIC	=> 1,
+    Q_ID	=> 2,
+    Q_FROM	=> 3,
+    Q_TO	=> 4,
+};
+
+my $remote_port     = REMOTE_PORT;
+my $management_port = REMOTE_M_PORT;
+my $seq_id = "0";
+my (%remote_locks, %lock_owners, %lock_names, %connections, %local_ids);
+
+WEC->init;
+my $socket = inet(LocalAddr => "127.0.0.1",
+		  LocalPort => $remote_port,
+		  ReuseAddr => 1);
+my $m_socket = inet(LocalAddr => "127.0.0.1",
+		    LocalPort => $management_port,
+		    ReuseAddr => 1);
+
+my $server = WEC::Locks::RemoteServer->new
+    (Handle => $socket,
+     LockRequest	=> \&lock_request,
+     AllowConnection	=> \&allow_connection,
+     Close		=> \&closed,
+     Drop		=> \&drop,
+     Quit		=> \&quit,
+     New		=> \&renew,
+     Sync		=> \&sync,
+     Replace		=> \&replace,
+     );
+
+# my $manager = WEC::Server->new(Handle => $m_socket);
+
+{
+    package OnEnd;
+
+    sub new {
+	return bless [(caller(1))[3]], shift;
+    }
+
+    sub DESTROY {
+	print STDERR shift->[0], ": ", Data::Dumper::Dumper(\%remote_locks, \%lock_owners, \%lock_names);
+    }
+}
+
+loop();
+
+sub allow_connection {
+    my ($connection) = @_;
+    my $id = $connection->{peer_id};
+    return "Already have a connection named '$id'" if $connections{$id};
+    $connections{$id} = $connection;
+    return;
+}
+
+sub merge_queued {
+    if (@_ <= 1) {
+	return $_[0] if @_ == 1;
+	return [];
+    }
+    return [sort {$a->[0] <=> $b->[0]} map @$_, @_];
+}
+
+# - Return ($f, $t), meaning interval $f-1 is completely to the left of
+#   our interval and $t+1 is completely to the right
+# - Return $f only if we have a clash ($f is the first clasher)
+sub overlap {
+    my ($locks, $atomic, $id, $from, $to) = @_;
+    my $f = my $t = -1;
+    for my $lock (@$locks) {
+	if ($t < 0) {
+	    $f++;
+	    next if $from > $lock->[R_TO];
+	    # f-1 is to our left
+	    $t = $f;
+	}
+	last if $to < $lock->[R_FROM];
+	# overlap with interval t
+	return $t if $atomic || $lock->[R_ATOMIC] || $id ne $lock->[R_ID];
+	$t++;
+    }
+    $f = $t = @$locks if $t < 0;
+    # $lock->[$f-1][R_TO]   <  $from <= $lock->[$f][R_TO];
+    # $lock->[$t-1][R_FROM] <= $to   <  $lock->[$t][R_FROM];
+    # After $f-1, before $t
+    print STDERR "overlap [$f, $t\[\n";
+    return $f, --$t;
+}
+
+sub atomic_match {
+    my ($name, $id, $from, $to) = @_;
+    my $remote_locks = $remote_locks{$name} || return;
+    my $f = 0;
+    for my $remote_lock (@$remote_locks) {
+	next if $from > $remote_lock->[R_FROM];
+	return if
+	    $remote_lock->[R_FROM] != $from ||
+	    $remote_lock->[R_TO]   != $to   ||
+	    $remote_lock->[R_ID]   ne $id   ||
+	    !$remote_lock->[R_ATOMIC];
+	return $f;
+    }
+    return;
+}
+
+sub no_locks {
+    my ($name) = @_;
+    delete $remote_locks{$name};
+    if (my $owners = delete $lock_owners{$name}) {
+	for my $id (keys %$owners) {
+	    delete $lock_names{$id}{$name};
+	    delete $lock_names{$id} if !%{$lock_names{$id}};
+	}
+    }
+}
+
+# Only to be called non-atomic!
+# Can leave queue set empty without being removed. requeue will check though.
+sub drop_locks {
+    my ($name, $id, $from, $to) = @_;
+
+    my $remote_locks = $remote_locks{$name} || return [];
+    my @queued;
+    for (my $i=0; $i < @$remote_locks; $i++) {
+	next if $from > $remote_locks->[$i][R_TO];
+	my $remote_lock = $remote_locks->[$i];
+	last if $to < $remote_lock->[R_FROM];
+	# Aha ! Overlap !
+	next if $remote_lock->[R_ATOMIC] || $remote_lock->[R_ID] ne $id;
+	my @requeue;
+	if ($from <= $remote_lock->[R_FROM]) {
+	    # cut something from the left
+	    if ($to < $remote_lock->[R_TO]) {
+		$remote_lock->[R_FROM] = $to+1;
+		my @keep;
+		for my $q (@{$remote_lock->[R_QUEUED]}) {
+		    if ($q->[Q_FROM] <= $remote_lock->[R_TO] &&
+			$q->[Q_TO] >= $remote_lock->[R_FROM]) {
+			push @keep, $q;
+		    } else {
+			push @requeue, $q;
+		    }
+		}
+		if (@requeue) {
+		    $remote_lock->[R_QUEUED] = \@keep;
+		    push @queued, \@requeue;
+		}
+	    } else {
+		splice(@$remote_locks, $i, 1);
+		$i--;
+		push @queued, $remote_lock->[R_QUEUED] if
+		    @{$remote_lock->[R_QUEUED]};
+	    }
+	} elsif ($to >= $remote_lock->[R_TO]) {
+	    # Cut from the right
+	    $remote_lock->[R_TO] = $from-1;
+	    my @keep;
+	    for my $q (@{$remote_lock->[R_QUEUED]}) {
+		if ($q->[Q_FROM] <= $remote_lock->[R_TO] &&
+		    $q->[Q_TO] >= $remote_lock->[R_FROM]) {
+		    push @keep, $q;
+		} else {
+		    push @requeue, $q;
+		}
+	    }
+	    if (@requeue) {
+		$remote_lock->[R_QUEUED] = \@keep;
+		push @queued, \@requeue;
+	    }
+	} else {
+	    # split into pieces
+	    my $new = [$id, $to+1, $remote_lock->[R_TO], undef];
+	    $remote_lock->[R_TO] = $from-1;
+
+	    my (@keep, @keep_new);
+	    for my $q (@{$remote_lock->[R_QUEUED]}) {
+		if ($q->[Q_FROM] <= $remote_lock->[R_TO] &&
+		    $q->[Q_TO] >= $remote_lock->[R_FROM]) {
+		    push @keep, $q;
+		} elsif ($q->[Q_FROM] <= $new->[R_TO] &&
+		    $q->[Q_TO] >= $new->[R_FROM]) {
+		    push @keep_new, $q;
+		} else {
+		    push @requeue, $q;
+		}
+	    }
+	    $remote_lock->[R_QUEUED] = \@keep;
+	    $new        ->[R_QUEUED] = \@keep_new;
+	    push @queued, \@requeue if @requeue;
+
+	    splice(@$remote_locks, $i+1, 0, $new);
+	}
+    }
+    return merge_queued(@queued);
+}
+
+# overlay a lock interval [$from, $to] over index range [$f, $t]
+sub subsume {
+    my ($remote_locks, $f, $t, $atomic, $id, $from, $to) = @_;
+
+    if ($f <= $t) {
+	# Overlaps with [$f..$t]
+	$from = $remote_locks->[$f][R_FROM] if
+	    $remote_locks->[$f][R_FROM] < $from;
+	$to   = $remote_locks->[$t][R_TO]   if
+	    $remote_locks->[$t][R_TO]   > $to;
+    }
+    if (!$atomic && $f &&
+	$remote_locks->[$f-1][R_TO]+1 == $from &&
+	!$remote_locks->[$f-1][R_ATOMIC] && $remote_locks->[$f-1][R_ID] eq $id) {
+	$f--;
+	$from = $remote_locks->[$f][R_FROM];
+    }
+    if (!$atomic && $t < $#$remote_locks &&
+	$remote_locks->[$t+1][R_FROM]-1 == $to &&
+	!$remote_locks->[$t+1][R_ATOMIC] && $remote_locks->[$t+1][R_ID] eq $id) {
+	$t++;
+	$to = $remote_locks->[$t][R_TO];
+    }
+    if ($f < $t) {
+	# Join at least two
+	my $remote_lock = $remote_locks->[$f];
+	$remote_lock->[R_FROM] = $from;
+	$remote_lock->[R_TO]   = $to;
+	$remote_lock->[R_QUEUED] =
+	    merge_queued($remote_lock, map $_->[R_QUEUED], splice(@$remote_locks, $f+1, $t-$f));
+    } elsif ($f == $t) {
+	# replace (extend)
+	my $remote_lock = $remote_locks->[$f];
+	$remote_lock->[R_FROM] = $from;
+	$remote_lock->[R_TO]   = $to;
+    } else {
+	# Completely new (inbetween)
+	splice(@$remote_locks, $f, 0, [$id, $from, $to, [], $atomic || ()]);
+    }
+}
+
+sub requeue {
+    my ($name, $requeue) = @_;
+    # $requeue is assumed to be sorted by Q_SEQ_ID
+
+    if (!@$requeue) {
+	no_locks($name) if $remote_locks{$name} && !@{$remote_locks{$name}};
+	return;
+    }
+
+    my $remote_locks = $remote_locks{$name} ||= [];
+    for my $r (@$requeue) {
+	my ($f, $t) = overlap($remote_locks, @$r[Q_ATOMIC, Q_ID, Q_FROM, Q_TO]);
+	if (!defined $t) {
+	    # Clash, still waiting
+	    my $queue = $remote_locks->[$f][R_QUEUED] ||= [];
+	    if (@$queue && $queue->[0][Q_SEQ_ID] > $r->[Q_SEQ_ID]) {
+		@$queue = sort { $a->[Q_SEQ_ID] <=> $b->[Q_SEQ_ID] } @$queue, $r;
+	    } else {
+		push @$queue, $r;
+	    }
+	} else {
+	    subsume($remote_locks, $f, $t, @$r[Q_ATOMIC, Q_ID, Q_FROM, Q_TO]);
+	    my ($id) = $r->[Q_ID] =~ /^([^:]+)/ or
+		die "Could not parse '$r->[Q_ID]' as host:local_id";
+	    if (my $connection = $connections{$id}) {
+		$connection->send("151 $r->[Q_SEQ_ID] LOCKED");
+	    } else {
+		# Handle dropped connection! --Ton
+		die "Not implemented (yet)";
+	    }
+	}
+    }
+}
+
+sub lock_request {
+    my ($connection, $code, $atomic, $local_id, $name, $from, $to) = @_;
+
+    my $id = "$connection->{peer_id}:$local_id";
+    my $tmp = OnEnd->new;
+    # print STDERR "lock_request: ", join(", ", @_[1..$#_]), "\n";
+    if ($code == LOCK_DROP) {
+	my $queued;
+	if ($atomic) {
+	    if (defined(my $f = atomic_match($name, $id, $from, $to))) {
+		my $remote_locks = $remote_locks{$name} ||
+		    die "Assert: found lock without locks";
+		my $old = splice(@$remote_locks, $f, 1);
+		$queued = $old->[R_QUEUED];
+		$connection->reply(RESPONSE_UNLOCKED);
+	    } else {
+		$queued = [];
+		$connection->reply(RESPONSE_UNLOCK_DENIED);
+	    }
+	} else {
+	    $queued = drop_locks($name, $id, $from, $to);
+	    $connection->reply(RESPONSE_UNLOCKED);
+	}
+	requeue($name, $queued);
+	return;
+    }
+
+    my $remote_locks = $remote_locks{$name};
+    if (!$remote_locks) {
+	if ($code == LOCK_QUERY) {
+	    $connection->reply(RESPONSE_NOT_LOCKED);
+	} else {
+	    $remote_locks{$name} = [[$id, $from, $to, [], $atomic || ()]];
+	    $lock_owners{$name}{$id} = 1;
+	    $lock_names{$id}{$name}  = 1;
+	    $local_ids{$connection->{peer_id}}{$id} ||= 1;
+	    $connection->reply(RESPONSE_LOCKED);
+	}
+	return;
+    }
+
+    my ($f, $t) = overlap($remote_locks, $atomic, $id, $from, $to);
+
+    if (!defined $t) {
+	if ($code == LOCK_DELAYED) {
+	    $seq_id++;
+	    push(@{$remote_locks->[$f][R_QUEUED]},
+		 [$seq_id, $atomic, $id, $from, $to]);
+	    $lock_owners{$name}{$id} ||= 1;
+	    $lock_names{$id}{$name}  ||= 1;
+	    $local_ids{$connection->{peer_id}}{$id} ||= 1;
+	    $connection->reply(RESPONSE_QUEUED, $seq_id);
+	} else {
+	    $connection->reply(RESPONSE_LOCK_DENIED);
+	}
+	return;
+    }
+
+    if ($code == LOCK_QUERY) {
+	$connection->reply(RESPONSE_NOT_LOCKED);
+	return;
+    }
+
+    subsume($remote_locks, $f, $t, $atomic, $id, $from, $to);
+    $lock_owners{$name}{$id} ||= 1;
+    $lock_names{$id}{$name}  ||= 1;
+    $local_ids{$connection->{peer_id}}{$id} ||= 1;
+    $connection->reply(RESPONSE_LOCKED);
+}
+
+sub drop_owned_locks {
+    my ($name, $id_set) = @_;
+    delete @{$lock_owners{$name}}{keys %$id_set};
+    delete $lock_owners{$name} if !%{$lock_owners{$name}};
+
+    my $remote_locks = $remote_locks{$name} ||
+	die "Assertion: No locks on $name";
+    my (@remote_locks, @requeue);
+    for my $remote_lock (@$remote_locks) {
+	if ($id_set->{$remote_lock->[R_ID]}) {
+	    my @q = grep !$id_set->{$_->[Q_ID]}, @{$remote_lock->[R_QUEUED]};
+	    push @requeue, \@q if @q;
+	} else {
+	    push @remote_locks, $remote_lock;
+	}
+    }
+    $remote_locks{$name} = \@remote_locks;
+    my $queued = merge_queued(@requeue);
+    requeue($name, $queued);
+}
+
+sub drop {
+    my ($connection, $local_id) = @_;
+    my $id = "$connection->{peer_id}:$local_id";
+    my $tmp = OnEnd->new;
+    print STDERR "DROP $id\n";
+    if (my $lock_names = delete $lock_names{$id}) {
+	for my $name (keys %$lock_names) {
+	    drop_owned_locks($name, {$id => 1});
+	}
+    }
+    delete $local_ids{$connection->{peer_id}}{$id};
+    $connection->reply(RESPONSE_DROPPED);
+}
+
+sub drop_all {
+    my ($connection) = @_;
+    if (my $local_ids = delete $local_ids{$connection->{peer_id}}) {
+	my %names;
+	for my $id (keys %$local_ids) {
+	    if (my $lock_names = delete $lock_names{$id}) {
+		@names{keys %$lock_names} = ();
+	    }
+	}
+	for my $name (keys %names) {
+	    drop_owned_locks($name, $local_ids);
+	}
+    }
+}
+
+sub renew {
+    my ($connection) = @_;
+    drop_all($connection);
+    $connection->send("251 $connection->{options}{InstanceId} ACTIVATE");
+    $connection->reset_replies;
+    $connection->resume_input;
+}
+
+sub sync {
+    my ($connection, $resend_from) = @_;
+    $connection->send("251 $connection->{options}{InstanceId} ACTIVATE");
+    $connection->resend_replies($resend_from);
+    $connection->resume_input;
+}
+
+sub replace {
+    my ($connection, $have_locks, $want_locks) = @_;
+    die "Replace not implemented yet\n";
+    $connection->send("251 $connection->{options}{InstanceId} ACTIVATE");
+    $connection->reset_replies;
+    $connection->resume_input;
+}
+
+sub closed {
+    my (undef, $connection, @reason) = @_;
+    print STDERR "Lost remote $connection: @reason\n";
+    $connection->drop_timers;
+    return if !$connection->{peer_id};
+    delete $connections{$connection->{peer_id}};
+}
+
+sub quit {
+    my ($connection) = @_;
+    drop_all($connection);
+}

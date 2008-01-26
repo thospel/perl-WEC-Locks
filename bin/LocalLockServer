@@ -1,0 +1,613 @@
+#!/usr/bin/perl -w
+use strict;
+use Data::Dumper;
+$Data::Dumper::Indent = 1;
+BEGIN {
+    use FindBin;
+    my $lib = $FindBin::Bin;
+    $lib =~ s![^/]+/?\z!lib! ||
+	die "Could not find a directory component in '$FindBin::Bin'";
+    require lib;
+    "lib"->import($lib);
+}
+
+use WEC qw(api=1 loop alive_signal
+	   Locks::LocalServer Locks::RemoteClient Locks::RemoteTransit);
+use WEC::Locks::Constants qw(LOCAL_PORT REMOTE_PORT LOCAL_M_PORT INFINITY
+			     LOCAL_QUIT DROP QUIT
+			     :lock_types :response_types);
+use WEC::Socket qw(inet unix);
+use Sys::Hostname;
+
+our $VERSION = "0.01";
+
+my $client_reconnect_period = 10;
+
+my $host = hostname;
+$host =~ s/\..*//s;
+
+my $client_id = $host;
+
+use constant {
+    # indices on a local locks element
+    L_ID	=> 0,
+    L_FROM	=> 1,
+    L_TO	=> 2,
+    L_ATOMIC	=> 3,
+
+    # Indices on %queued element
+    Q_CONNECTION	=> 0,
+    Q_ATOMIC		=> 1,
+    Q_NAME		=> 2,
+    Q_FROM		=> 3,
+    Q_TO		=> 4,
+    Q_LOCAL_SEQ_ID	=> 5,
+};
+
+my $local_port = shift || LOCAL_PORT;
+my $remote_server = "tcp://127.0.0.1:" . REMOTE_PORT;
+my $management_port = LOCAL_M_PORT;
+
+# At the moment a request comes in, %local_locks is always a subset of
+# what it should be if all pending commands had been serviced.
+my (%local_locks, %more, %less, %queued, $transit, %lock_owners, %connections);
+my ($instance_id, $terminating, $reconnect_alarm);
+
+WEC->init;
+my $socket = unix(Path => $local_port,
+		  # ReuseAddr => 1,
+		  );
+my $m_socket = inet(LocalAddr => "127.0.0.1",
+		    LocalPort => $management_port,
+		    ReuseAddr => 1);
+
+my $server = WEC::Locks::LocalServer->new
+    (Handle		=> $socket,
+     Paths		=> "unix://$local_port",
+     LockRequest	=> \&lock_request,
+     AllowConnection	=> \&allow_connection,
+     Quit		=> \&quit,
+     Close		=> \&client_closed,
+     );
+my $clients = WEC::Locks::RemoteClient->new
+    (ClientId		=> $client_id,
+     ConnectFail	=> \&connect_fail,
+     LockResponse	=> \&lock_response,
+     LockAcquired	=> \&lock_acquired,
+     Dropped		=> \&dropped,
+     Sync		=> \&sync,
+     Greeting		=> \&remote_greeting,
+     Close		=> \&remote_closed,
+     );
+$transit = WEC::Locks::RemoteTransit->new;
+
+# my $manager = WEC::Server->new(Handle => $m_socket);
+
+my $connect_time = time;
+remote_connect();
+
+{
+    package OnEnd;
+
+    sub new {
+	return bless [(caller(1))[3]], shift;
+    }
+
+    sub DESTROY {
+	print STDERR shift->[0], ": ", Data::Dumper::Dumper(\%local_locks);
+    }
+}
+
+alive_signal(0);
+WEC->add_signal(TERM => \&terminate);
+WEC->add_signal(INT  => \&terminate);
+
+loop();
+
+sub allow_connection {
+    my ($connection) = @_;
+    my $id = $connection->{peer_id};
+    return "Already have a connection named '$id'" if $connections{$id};
+    return "Terminating" if $terminating;
+    $connections{$id} = $connection;
+    return;
+}
+
+# - Return ($f, $t), meaning interval $f-1 is completely to the left of
+#   our interval and $t+1 is completely to the right
+# - Return $f only if we have a clash ($f is the first clasher)
+sub overlap {
+    my ($locks, $atomic, $id, $from, $to) = @_;
+    my $f = my $t = -1;
+    for my $lock (@$locks) {
+	if ($t < 0) {
+	    $f++;
+	    next if $from > $lock->[L_TO];
+	    # f-1 is to our left
+	    $t = $f;
+	}
+	last if $to < $lock->[L_FROM];
+	# overlap with interval t
+	return $t if
+	    $atomic || $lock->[L_ATOMIC] || $id ne $lock->[L_ID];
+	$t++;
+    }
+    $f = $t = @$locks if $t < 0;
+    # $lock->[$f-1][L_TO]   <  $from <= $lock->[$f][L_TO];
+    # $lock->[$t-1][L_FROM] <= $to   <  $lock->[$t][L_FROM];
+    # After $f-1, before $t
+    print STDERR "overlap [$f, $t\[\n";
+    return $f, --$t;
+}
+
+sub atomic_match {
+    my ($name, $id, $from, $to) = @_;
+    my $local_locks = $local_locks{$name} || return;
+    my $f = 0;
+    for my $local_lock (@$local_locks) {
+	next if $from > $local_lock->[L_FROM];
+	return if
+	    $local_lock->[L_FROM] != $from ||
+	    $local_lock->[L_TO]   != $to   ||
+	    $local_lock->[L_ID]   ne $id   ||
+	    !$local_lock->[L_ATOMIC];
+	return $f;
+    }
+    return;
+}
+
+sub no_locks {
+    my ($name) = @_;
+    delete $local_locks{$name};
+    if (my $owners = delete $lock_owners{$name}) {
+	for my $id (keys %$owners) {
+	    my $connection = $connections{$id};
+	    delete $connection->{locks}{$name};
+	}
+    }
+}
+
+# Only to be called non-atomic!
+sub drop_locks {
+    my ($name, $id, $from, $to) = @_;
+
+    my $local_locks = $local_locks{$name} || return 0;
+    my $deleted = 0;
+    for (my $i=0; $i < @$local_locks; $i++) {
+	next if $from > $local_locks->[$i][L_TO];
+	my $local_lock = $local_locks->[$i];
+	last if $to < $local_lock->[L_FROM];
+	# Aha ! Overlap !
+	next if $local_lock->[L_ATOMIC] || $local_lock->[L_ID] ne $id;
+	$deleted++;
+	if ($from <= $local_lock->[L_FROM]) {
+	    # cut somethinmg from the left
+	    if ($to < $local_lock->[L_TO]) {
+		$local_lock->[L_FROM] = $to+1;
+	    } else {
+		splice(@$local_locks, $i, 1);
+		$i--;
+	    }
+	} elsif ($to >= $local_lock->[L_TO]) {
+	    # Cut from the right
+	    $local_lock->[L_TO] = $from-1;
+	} else {
+	    # split into pieces
+	    my $new = [$id, $to+1, $local_lock->[L_TO], 0];
+	    $local_lock->[L_TO] = $from-1;
+	    splice(@$local_locks, $i+1, 0, $new);
+	}
+    }
+    no_locks($name) if !@$local_locks;
+    return $deleted;
+}
+
+sub lock_request {
+    my ($connection, $code, $atomic, $name, $from, $to) = @_;
+    my $id = $connection->{peer_id};
+    my $tmp = OnEnd->new;
+    # print STDERR "lock_request: ", join(", ", @_[1..$#_]), "\n";
+
+    if ($code == LOCK_DROP) {
+	if ($atomic) {
+	    if (!$less{$name} || !$more{$name}) {
+		my $f = atomic_match($name, $id, $from, $to);
+		if (defined $f) {
+		    if (!$less{$name}) {
+			# Atomic range found at the expected place
+
+			my $local_locks = $local_locks{$name} ||
+			    die "Assert: found lock without locks";
+			splice(@$local_locks, $f, 1);
+			no_locks($name) if !@$local_locks;
+
+			$transit->send($code, $connection,
+				       $name, $from, $to, $atomic,
+				       pre_reply => "254 LOCK DROPPED");
+			return;
+		    }
+		} elsif (!$more{$name}) {
+		    # no atomic range found at the expected place
+		    $transit->send($code, $connection,
+				   $name, $from, $to, $atomic,
+				   reply	=> "452 WASN'T LOCKED");
+		    return;
+		}
+	    }
+	} elsif (!$more{$name}) {
+	    my $deleted = drop_locks($name, $id, $from, $to);
+	    $transit->send($code, $connection,
+			   $name, $from, $to, $atomic,
+			   $deleted ? "pre_reply" : "reply" =>
+			   "254 LOCK_DROPPED");
+	    return;
+	}
+	$less{$name}{$id}++;
+	$connection->{changes}{$name}++;
+    } elsif ($code == LOCK_IMMEDIATE || $code == LOCK_QUERY) {
+	if (!$less{$name} and
+	    my $local_locks = $local_locks{$name}) {
+	    my ($f, $t) = overlap($local_locks, $atomic, $id, $from, $to);
+	    if (!defined $t) {
+		# Clash
+		$transit->send($code, $connection,
+			       $name, $from, $to, $atomic,
+			       reply	=> "451 LOCKED");
+		return;
+	    }
+	    # non-atomic sequential could be answered immmediately
+	}
+	if ($code == LOCK_IMMEDIATE) {
+	    $more{$name}{$id}++;
+	    $connection->{changes}{$name}++;
+	}
+    } elsif ($code == LOCK_DELAYED) {
+	# non-atomic sequential could be answered immmediately
+	$more{$name}{$id}++;
+	$connection->{changes}{$name}++;
+    } else {
+	die "Unhandled code $code";
+    }
+    $transit->send($code, $connection,
+		   $name, $from, $to, $atomic);
+}
+
+sub lock_response {
+    my ($client, $code, $req_id, $seq_id) = @_;
+    my $tmp = OnEnd->new;
+    # print STDERR "Response @_[1..$#_]\n";
+
+    my ($connection, $name, $from, $to, $atomic, $pre_executed) =
+	$transit->shift_lock($req_id);
+    my $id = $connection->{peer_id};
+
+    if ($code == RESPONSE_LOCK_DENIED) {
+	$connection->send("451 ALREADY LOCKED");
+	delete $connection->{changes} if --$connection->{changes}{$name} == 0;
+	if (--$more{$name}{$id} == 0) {
+	    delete $more{$name}{$id};
+	    delete $more{$name} if !%{$more{$name}};
+	}
+    } elsif ($code == RESPONSE_QUEUED) {
+	$connection->{seq_id} ||= "1";
+	my $local_seq_id = $connection->{seq_id}++;
+	$connection->send("253 $local_seq_id QUEUED");
+	die "Assert: already queued with id $seq_id" if $queued{$seq_id};
+	$queued{$seq_id} =
+	    [$connection, $atomic, $name, $from, $to, $local_seq_id];
+	$connection->{queued}{$local_seq_id} = 1;
+    } elsif ($code == RESPONSE_LOCKED) {
+	$connection->send("252 GOT LOCK");
+	unless ($connection->{locks}{$name}) {
+	    $connection->{locks}{$name} = 1;
+	    $lock_owners{$name}{$id} = 1;
+	}
+	delete $connection->{changes} if --$connection->{changes}{$name} == 0;
+	if (--$more{$name}{$id} == 0) {
+	    delete $more{$name}{$id};
+	    delete $more{$name} if !%{$more{$name}};
+	}
+	if (my $local_locks = $local_locks{$name}) {
+	    my ($f, $t) = overlap($local_locks, $atomic, $id, $from, $to);
+	    die "Assert: Lock should have beeen possible" if !defined $t;
+
+	    if ($f <= $t) {
+		# Overlaps with [$f..$t]
+		$from = $local_locks->[$f][L_FROM] if
+		    $local_locks->[$f][L_FROM] < $from;
+		$to   = $local_locks->[$t][L_TO]   if
+		    $local_locks->[$t][L_TO]   > $to;
+	    }
+	    if (!$atomic && $f &&
+		$local_locks->[$f-1][L_TO]+1 == $from &&
+		!$local_locks->[$f-1][L_ATOMIC] &&
+		$local_locks->[$f-1][L_ID] eq $id) {
+		$f--;
+		$from = $local_locks->[$f][L_FROM];
+	    }
+	    if (!$atomic && $t < $#$local_locks &&
+		$local_locks->[$t+1][L_FROM]-1 == $to &&
+		!$local_locks->[$t+1][L_ATOMIC] &&
+		$local_locks->[$t+1][L_ID] eq $id) {
+		$t++;
+		$to = $local_locks->[$t][L_TO];
+	    }
+	    if ($f < $t) {
+		# Join at least two
+		my $local_lock = $local_locks->[$f];
+		$local_lock->[L_FROM] = $from;
+		$local_lock->[L_TO]   = $to;
+		splice(@$local_locks, $f+1, $t-$f);
+	    } elsif ($f == $t) {
+		# replace (extend)
+		my $local_lock = $local_locks->[$f];
+		$local_lock->[L_FROM] = $from;
+		$local_lock->[L_TO]   = $to;
+	    } else {
+		# Completely new (inbetween)
+		splice(@$local_locks, $f, 0, [$id, $from, $to, $atomic]);
+	    }
+	} else {
+	    $local_locks{$name} = [[$id, $from, $to, $atomic]];
+	}
+    } elsif ($code == RESPONSE_UNLOCKED) {
+	if ($pre_executed) {
+	    if ($atomic) {
+		# This was the case of pre-removing an atomic range
+		# nothing needs to be done
+	    } else {
+		# We already did a provisional remove, but maybe not full
+		drop_locks($name, $id, $from, $to);
+	    }
+	} else {
+	    if ($atomic) {
+		my $f = atomic_match($name, $id, $from, $to);
+		die "Assert: expected to find atomic range" if !defined $f;
+		my $local_locks = $local_locks{$name} ||
+		    die "Assert: found lock without locks";
+		splice(@$local_locks, $f, 1);
+		no_locks($name) if !@$local_locks;
+	    } else {
+		drop_locks($name, $id, $from, $to);
+	    }
+	    delete $connection->{changes} if
+		--$connection->{changes}{$name} == 0;
+	    if (--$less{$name}{$id} == 0) {
+		delete $less{$name}{$id};
+		delete $less{$name} if !%{$less{$name}};
+	    }
+	    $connection->send("254 LOCK DROPPED");
+	}
+    } elsif ($code == RESPONSE_UNLOCK_DENIED) {
+	# Failure should be completely impossible here
+	die "Assert: pre-aproved unlock failed" if !$atomic;
+	if ($pre_executed) {
+	    # This was the case of pre-removing an atomic range
+	    # It should have worked!
+		die "Assert: pre-aproved unalock failed";
+	}
+	delete $connection->{changes} if
+	    --$connection->{changes}{$name} == 0;
+	if (--$less{$name}{$id} == 0) {
+	    delete $less{$name}{$id};
+	    delete $less{$name} if !%{$less{$name}};
+	}
+	$connection->send("452 WASN'T LOCKED");
+    } elsif ($code == RESPONSE_NOT_LOCKED) {
+	$connection->send("255 LOCKABLE");
+    } else {
+	die "Unimplemented code $code";
+    }
+    $transit->flush;
+}
+
+sub lock_acquired {
+    my ($client, $seq_id) = @_;
+    my $queued = delete($queued{$seq_id}) || die "Queued lock $seq_id unknown";
+    my $connection = $queued->[Q_CONNECTION];
+    my $id = $connection->{peer_id};
+    my $local_seq_id = $queued->[Q_LOCAL_SEQ_ID];
+    my $name = $queued->[Q_NAME];
+    delete $connection->{changes} if --$connection->{changes}{$name} == 0;
+    if (--$more{$name}{$id} == 0) {
+	delete $more{$name}{$id};
+	delete $more{$name} if !%{$more{$name}};
+    }
+    delete $connection->{queued}{$local_seq_id};
+    $connection->send("151 $local_seq_id");
+}
+
+sub dropped {
+    my ($client, $req_id) = @_;
+    my ($connection) = $transit->shift_drop($req_id);
+
+    my $id = $connection->{peer_id} || die "Assertion: No peer_id on drop";
+    my $tmp = OnEnd->new;
+    print STDERR "Dropping $id\n";
+
+    # Drop all pending locks
+    if (my $queued = delete $connection->{queued}) {
+	delete @queued{keys %$queued};
+    }
+
+    # Drop all uncertainty
+    if (my $changes = delete $connection->{changes}) {
+	for my $name (keys %$changes) {
+	    delete $more{$name};
+	    delete $less{$name};
+	}
+    }
+    if (my $locks = delete $connection->{locks}) {
+	for my $name (keys %$locks) {
+	    delete $lock_owners{$name}{$id};
+	    if (%{$lock_owners{$name}}) {
+		if (my $local_lock = $local_locks{$name}) {
+		    if (my @locks = grep $_->[L_ID] ne $id, @$local_lock) {
+			$lock_owners{$name} = \@locks;
+		    } else {
+			no_locks($name);
+		    }
+		}
+	    } else {
+		delete $lock_owners{$name};
+		delete $local_locks{$name};
+	    }
+	}
+    }
+
+    delete $connections{$id};
+    $transit->flush;
+    $transit->direct_send("QUIT") if !%connections && $terminating;
+}
+
+sub quit {
+    my ($connection) = @_;
+    $transit->send(LOCAL_QUIT, $connection, "221 GOODBYE");
+    do_drop($connection);
+}
+
+sub client_closed {
+    my (undef, $connection, @reason) = @_;
+    print STDERR "Closed $connection: @reason\n";
+    do_drop($connection) if $connection->{peer_id};
+}
+
+sub do_drop {
+    my ($connection) = @_;
+    return if $connection->{dropped};
+
+    $transit->send(DROP, $connection);
+
+    $connection->{dropped} = 1;
+}
+
+sub connect_fail {
+    my ($client, $c_connection, $operation, $status, $destination) = @_;
+    print STDERR "$operation to $destination failed: $status\n";
+    if (%connections || !$terminating) {
+	print STDERR "Add_alarm\n";
+	$reconnect_alarm = 
+	    WEC->add_alarm($client_reconnect_period, \&remote_connect);
+    }
+    $c_connection->drop_timers;
+}
+
+sub remote_connect {
+    $reconnect_alarm = undef;
+    print STDERR "Try remote connect\n";
+    $clients->connect($remote_server);
+}
+
+sub remote_closed {
+    my (undef, $c_connection, @reason) = @_;
+    print STDERR "Last remote $c_connection: @reason\n";
+    $connect_time = time;
+    $transit->set_client(undef);
+    if ($terminating && !%connections) {
+	print STDERR "Drop_alarm\n";
+    } else {
+	print STDERR "Add_alarm\n";
+	$reconnect_alarm = 
+	    WEC->add_alarm($client_reconnect_period, \&remote_connect);
+    }
+    $c_connection->drop_timers;
+}
+
+# We are completely synced. Free traffic can start
+sub remote_greeting {
+    my ($c_connection, $i_id) = @_;
+    $instance_id = $i_id || die "No instance id";
+    $transit->set_client($c_connection);
+}
+
+# Please sync up
+sub sync {
+    my ($c_connection, $i_id, $pending_from, $pending_to) = @_;
+    print STDERR "Sync @_\n";
+
+    if (!%connections && $terminating) {
+	$c_connection->send("QUIT");
+	return;
+    }
+
+    if (!$instance_id) {
+	# Simplest case, we never connected to a server yet
+	$c_connection->send("NEW");
+	return;
+    }
+    if ($instance_id eq $i_id) {
+	if ($pending_from eq "inf") {
+	    # Never heard of me before
+	    die "remote doesn't know me while I have locks" if
+		%local_locks || %queued;
+	    $c_connection->send("SYNCED $pending_to");
+	    return;
+	}
+
+	if (my $start = $transit->first_request_id) {
+	    # check: $pending_from <= $start
+	    die "Remembered range from $pending_from but I need from $start" if
+		length $pending_from > length $start ||
+		length $pending_from == length $start &&
+		$pending_from gt $start;
+	    $transit->resend($pending_to);
+	    $c_connection->send("SYNCED $start");
+	    return;
+	}
+	# We don't have anything pending
+	my $next = $transit->next_request_id;
+	$pending_to eq $next ||
+	    die "Remote expects me to start a $pending_to, but I'm at $next";
+	$transit->resend($next);
+	$c_connection->send("SYNCED $pending_to");
+	return;
+    }
+    
+    $c_connection->send("REPLACE");
+    for my $name (sort keys %local_locks) {
+	my $local_locks = $local_locks{$name};
+	for my $local_lock (@$local_locks) {
+	    my $command = $local_lock->[L_ATOMIC] ? 
+		"REALOCK $local_lock->[L_ID] $name" : 
+		"RELOCK $local_lock->[L_ID] $name";
+	    if ($local_lock->[L_FROM] || $local_lock->[L_TO] != INFINITY) {
+		$command .= " $local_lock->[L_FROM]";
+		$command .= " $local_lock->[L_TO]" if 
+		    $local_lock->[L_TO] != INFINITY;
+	    }
+	    $c_connection->send($command);
+	}
+    }
+    for my $seq_id (sort {length $a <=> length $b || $a cmp $b} keys %queued) {
+	my $queued = $queued{$seq_id};
+	my $command = $queued->[Q_ATOMIC] ?
+	    "RETRYALOCK $seq_id $queued->[Q_CONNECTION]->{peer_id} $queued->[Q_NAME]" :
+	    "RETRYLOCK $seq_id $queued->[Q_CONNECTION]->{peer_id} $queued->[Q_NAME]";
+	if ($queued->[Q_FROM] || $queued->[Q_TO] != INFINITY) {
+	    $command .= " $queued->[Q_FROM]";
+	    $command .= " $queued->[Q_TO]" if $queued->[Q_TO] != INFINITY;
+	}
+	$c_connection->send($command);
+    }
+    my $start = $transit->first_request_id || $transit->next_request_id;
+    $c_connection->send("SYNCED $start");
+}
+
+sub terminate {
+    return if $terminating;
+    $terminating = 1;
+    $server->accepting(0);
+    for my $connection (values %connections) {
+	$connection->send("121 PLEASE TERMINATE") if 
+	    $connection->{out_handle};
+    }
+    if (!%connections) {
+	if ($reconnect_alarm) {
+	    WEC->delete_alarm($reconnect_alarm);
+	    $reconnect_alarm = undef;
+	} elsif (my $client = $transit->client) {
+	    $transit->direct_send("QUIT");
+	}
+	# There's also the possibility that a connect is going on
+    }
+}

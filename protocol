@@ -1,0 +1,104 @@
+remote:
+
+Remote Server greeting:
+  220 protocol-name server-software server-software-version server-id server-challenge|
+
+Greeting command:
+  HELO client-software client-software-version client-id client-challenge server-challenge-response
+  250 client-challenge-response instance_id first_unack expected_req_id|
+  (unacks are 0 and -1 if nothing unacked)
+  458 reason string|
+
+(replace..(alphabetic|seq order)..synced|new|synced)
+
+Replace command:
+  REPLACE
+  257 CONTINUE
+
+Sync command:
+  SYNCED resend_from
+  101| WAIT
+  251| ACTIVATE
+
+New command:
+  NEW
+  101| WAIT
+  251| ACTIVATE
+  
+non-immediate lock request:
+  TRY_(A)LOCK req_nr local_id name range
+  (encoded))
+  252 req_nr| got_lock
+  253 req_nr seq_id| lock pending
+ later:
+  151 seq_id| delayed lock acquired
+
+immediate lock request:
+  (A)LOCK req_nr local_id name range
+  451 req_nr| is locked
+  252 req_nr| got_lock
+
+query lock request:
+  QUERY_(A)LOCK req_nr local_id name range
+  (encoded))
+  451 req_nr| is locked
+  255 req_nr| is unlocked
+
+drop lock request:
+  DROP_(A)LOCK req_nr local_id name range
+  (encoded)
+  256 req_nr| dropped
+
+acq an answered command (server may forget the answer)
+  ACK seq_nr
+  (no answer!)
+
+quitting:
+  QUIT
+  221| goodbye (server starts ignoring all input, closes connection)
+
+probed:
+  PROBE
+  122| probed
+
+local:
+
+Local Server greeting:
+  220 protocol-name server-software server-software-version server-id server-challenge|
+
+Greeting command:
+  HELO client-software client-software-version client-id client-challenge server-challenge-response
+  250 client-challenge-response|
+  458 reason string|
+
+non-immediate lock request:
+  TRY_LOCK name range
+  (encoded))
+  252| got_lock
+  253 seq_id| lock pending
+ later:
+  151 seq_id| delayed lock acquired
+
+immediate lock request:
+  LOCK name range
+  451| is locked
+  252| got_lock
+
+query lock request:
+  QUERY_LOCK name range
+  (encoded))
+  451| is locked
+  255| is unlocked
+
+drop lock request:
+  UNLOCK name range
+  (encoded)
+  254| lock dropped
+  452| wasn't locked (only possible for UNALOCK)
+
+quitting:
+  QUIT
+  221| goodbye (server starts ignoring all input, closes connection)
+
+termination request
+  121| please terminate
