@@ -6,7 +6,7 @@ use Carp;
 
 use WEC::Locks::Constants qw(:lock_types INFINITY);
 
-our $VERSION = '0.01';
+our $VERSION = '1.000';
 
 use base qw(WEC::Locks::Connection);
 

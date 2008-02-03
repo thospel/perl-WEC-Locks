@@ -1,0 +1,49 @@
+# Generated on 2008-02-03 22:38:41 UT using /usr/local/bin/release_pm
+BEGIN
+DIGITS 3
+RELEASE 1.000
+VERSION 80f753c49dbcf5a2325512e39ee7e329 1.000 Changes
+VERSION ea34a49497e6dcced469ca4d94f99e6b 1.000 Makefile.PL
+VERSION 2ce09386d26248d5111f87c8c82ccdd4 1.000 MANIFEST
+VERSION b820e13a211817ff9b283c0bafdaed5e 1.000 README
+VERSION 6a1fba39ee174ac321d32e8a32aed427 1.000 lib/WEC/Locks/LocalClient.pm
+VERSION 02a15c98055acf993797e6ab9ce909fc 1.000 lib/WEC/Locks/Connection/LocalClient.pm
+VERSION 4c81c72487cf7b33a6b2454410269a9a 1.000 lib/WEC/Locks/Connection/LocalServer.pm
+VERSION d686ac37eb6691a33b921da37259c671 1.000 lib/WEC/Locks/Connection/RemoteClient.pm
+VERSION 73a6168c805184f495a54e521fda249b 1.000 lib/WEC/Locks/Connection/RemoteServer.pm
+VERSION 6557eb85f895d3d0c0e2ed59a8018201 1.000 lib/WEC/Locks/Connection.pm
+VERSION 5360e6054eb087f6677f6bcb6939e88e 1.000 lib/WEC/Locks/LocalServer.pm
+VERSION 005ad1e981caa9fc63a0f45f9bce801c 1.000 lib/WEC/Locks/RemoteClient.pm
+VERSION a015fbffc9cfde1eba9424d47ae28ec5 1.000 lib/WEC/Locks/RemoteServer.pm
+VERSION 5c0a25fbffd8469e995166950094d892 1.000 lib/WEC/Locks/RemoteTransit.pm
+VERSION a55e2dbd70457b57e3ac195bbc083e5f 1.000 lib/WEC/Locks/Constants.pm
+VERSION 4e23c007be3aab6ee2ffbc11a5cd3692 1.000 lib/WEC/Locks/Utils.pm
+VERSION 416d6917cada35721f818c6800a10217 1.000 bin/LocalLockServer
+VERSION 4c2eb42d1f67d4df2c1a94c1b6c7e8f1 1.000 bin/RemoteLockServer
+VERSION d06830861dd8cdec2d29da34ea65bac4 1.000 t/00_LocalClient.t
+VERSION 89d32fafc3703a29fdef92ef4cc7f11f 1.000 t/00_LocalServer.t
+VERSION 5e97751e787f81a17100e516ea855fde 1.000 t/00_RemoteClient.t
+VERSION d081bc25ece55d28be6b928203eb3df5 1.000 t/00_RemoteServer.t
+RELEASED 1.000 1.000 Changes
+RELEASED 1.000 1.000 MANIFEST
+RELEASED 1.000 1.000 Makefile.PL
+RELEASED 1.000 1.000 README
+RELEASED 1.000 1.000 bin/LocalLockServer
+RELEASED 1.000 1.000 bin/RemoteLockServer
+RELEASED 1.000 1.000 lib/WEC/Locks/Connection.pm
+RELEASED 1.000 1.000 lib/WEC/Locks/Connection/LocalClient.pm
+RELEASED 1.000 1.000 lib/WEC/Locks/Connection/LocalServer.pm
+RELEASED 1.000 1.000 lib/WEC/Locks/Connection/RemoteClient.pm
+RELEASED 1.000 1.000 lib/WEC/Locks/Connection/RemoteServer.pm
+RELEASED 1.000 1.000 lib/WEC/Locks/Constants.pm
+RELEASED 1.000 1.000 lib/WEC/Locks/LocalClient.pm
+RELEASED 1.000 1.000 lib/WEC/Locks/LocalServer.pm
+RELEASED 1.000 1.000 lib/WEC/Locks/RemoteClient.pm
+RELEASED 1.000 1.000 lib/WEC/Locks/RemoteServer.pm
+RELEASED 1.000 1.000 lib/WEC/Locks/RemoteTransit.pm
+RELEASED 1.000 1.000 lib/WEC/Locks/Utils.pm
+RELEASED 1.000 1.000 t/00_LocalClient.t
+RELEASED 1.000 1.000 t/00_LocalServer.t
+RELEASED 1.000 1.000 t/00_RemoteClient.t
+RELEASED 1.000 1.000 t/00_RemoteServer.t
+END

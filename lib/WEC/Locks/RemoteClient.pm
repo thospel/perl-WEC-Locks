@@ -12,7 +12,7 @@ use WEC::Locks::Connection::RemoteClient;
 use WEC::Locks::Constants qw(REMOTE_PORT);
 use WEC::Locks::Utils qw(check_options);
 
-our $VERSION = '0.01';
+our $VERSION = '1.000';
 
 our @CARP_NOT	= qw(WEC::Client WEC::FieldClient WEC::Locks::Utils);
 

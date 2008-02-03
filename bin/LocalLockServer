@@ -19,7 +19,7 @@ use WEC::Locks::Constants qw(LOCAL_PORT REMOTE_PORT LOCAL_M_PORT INFINITY
 use WEC::Socket qw(inet unix);
 use Sys::Hostname;
 
-our $VERSION = "0.01";
+our $VERSION = "1.000";
 
 my $client_reconnect_period = 10;
 

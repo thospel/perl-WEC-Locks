@@ -16,7 +16,7 @@ use WEC::Locks::Constants qw(REMOTE_PORT REMOTE_M_PORT INFINITY
 			     :response_types :lock_types);
 use WEC::Socket qw(inet);
 
-our $VERSION = "0.01";
+our $VERSION = "1.000";
 
 use constant {
     # indices on a remote locks element

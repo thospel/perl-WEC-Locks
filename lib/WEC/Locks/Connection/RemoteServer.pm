@@ -7,7 +7,7 @@ use Carp;
 use WEC::Locks::Constants qw(:lock_types :response_types 
 			     INFINITY REQUEST_START);
 
-our $VERSION = '0.01';
+our $VERSION = '1.000';
 
 use base qw(WEC::Locks::Connection);
 

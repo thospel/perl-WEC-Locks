@@ -12,7 +12,7 @@ use WEC::Locks::Connection::LocalServer;
 use WEC::Locks::Constants qw(LOCAL_PORT);
 use WEC::Locks::Utils qw(check_options);
 
-our $VERSION = '0.01';
+our $VERSION = '1.000';
 our @CARP_NOT	= qw(WEC::Server WEC::FieldServer WEC::Locks::Utils);
 
 use base qw(WEC::Server);

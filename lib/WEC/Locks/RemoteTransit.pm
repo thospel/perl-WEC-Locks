@@ -7,7 +7,7 @@ use Carp;
 use WEC::Locks::Constants qw(INFINITY REQUEST_START LOCAL_QUIT QUIT DROP
 			     :lock_types);
 
-our $VERSION = '0.01';
+our $VERSION = '1.000';
 
 use constant {
     # indices on a transit queue element

@@ -7,7 +7,7 @@ use Carp;
 use WEC::Locks::Constants qw(INFINITY);
 use WEC::Connection qw(CALLBACK PARENT);
 
-our $VERSION = '0.01';
+our $VERSION = '1.000';
 
 use base qw(WEC::Locks::Connection);
 
