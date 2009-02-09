@@ -1,9 +1,9 @@
-# Generated on 2008-02-03 22:38:41 UT using /usr/local/bin/release_pm
+# Generated on 2009-02-09 09:30:41 UT using /usr/local/bin/release_pm
 BEGIN
 DIGITS 3
 RELEASE 1.000
-VERSION 80f753c49dbcf5a2325512e39ee7e329 1.000 Changes
-VERSION ea34a49497e6dcced469ca4d94f99e6b 1.000 Makefile.PL
+VERSION a1db046548b74d02dc2b2052add61897 1.000 Changes
+VERSION 79c6e5123341ad4862685b3bfb770547 1.000 Makefile.PL
 VERSION 2ce09386d26248d5111f87c8c82ccdd4 1.000 MANIFEST
 VERSION b820e13a211817ff9b283c0bafdaed5e 1.000 README
 VERSION 6a1fba39ee174ac321d32e8a32aed427 1.000 lib/WEC/Locks/LocalClient.pm
