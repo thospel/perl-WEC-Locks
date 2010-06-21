@@ -62,7 +62,7 @@ my %local_command_to_code =
      UNALOCK	=> LOCK_DROP,
 );
 
-my %local_command_to_atomic = 
+my %local_command_to_atomic =
     map {$_ => 1} qw(ALOCK TRY_ALOCK QUERY_ALOCK UNALOCK);
 
 sub client_request {

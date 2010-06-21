@@ -4,7 +4,7 @@ use strict;
 use warnings;
 use Carp;
 
-use WEC::Locks::Constants qw(:lock_types :response_types 
+use WEC::Locks::Constants qw(:lock_types :response_types
 			     INFINITY REQUEST_START);
 
 our $VERSION = '1.000';
@@ -64,7 +64,7 @@ sub client_identity {
 	$connection->send("458 $message");
 	return;
     }
-    
+
     $expected_request_id{$client_id} ||= REQUEST_START;
     my $from;
     if (my $replies = $pending_replies{$client_id}) {
@@ -101,7 +101,7 @@ sub resend_replies {
 	    last if $pending =~ $match;
 	    $pos++;
 	}
-	die "Could not find request_id $resend_from" if 
+	die "Could not find request_id $resend_from" if
 	    $pos == @{$pending_replies{$remote_id}};
 	splice(@{$pending_replies{$remote_id}}, 0, $pos);
     }
@@ -112,7 +112,7 @@ sub resend_replies {
 sub resync {
     my ($connection, $line) = @_;
     $connection->reset_receive_timer;
-    
+
     if ($line =~ /^NEW(?:\s|\z)/i) {
         $connection->send("101 WAIT");
 	$connection->{in_state} = \&client_request;
@@ -135,7 +135,7 @@ sub resync {
 		last if $pending =~ $match;
 		$pos++;
 	    }
-	    die "Could not find request_id $resend_from" if 
+	    die "Could not find request_id $resend_from" if
 		$pos == @{$pending_replies{$remote_id}};
 	}
 
@@ -232,7 +232,7 @@ sub client_request {
 	my $reply = $pending->[0] || croak "ACK without anything pending";
 	my ($req_id) = $line =~ /^0*(\w+)(?:\s|\z)/ or
 	    croak "Syntax error in ACK $line";
-	$reply =~ /^\d+\s+$req_id(?:\s|\z)/ || 
+	$reply =~ /^\d+\s+$req_id(?:\s|\z)/ ||
 	    croak "Expected ack to $reply";
 	shift @$pending;
     } elsif ($line =~ s/^(LOCK|TRY_LOCK|QUERY_LOCK|UNLOCK|ALOCK|TRY_ALOCK|QUERY_ALOCK|UNALOCK)(?:\s+|\z)//i) {
@@ -274,14 +274,14 @@ sub client_request {
 
 sub drop_timers {
     my ($connection) = @_;
-    WEC->delete_alarm(delete $connection->{send_timer}) if 
+    WEC->delete_alarm(delete $connection->{send_timer}) if
 	$connection->{send_timer};
     WEC->delete_alarm(delete $connection->{receive_timer});
 }
 
 sub send_probe {
     my ($connection) = @_;
-    $connection->SUPER::send("122 PROBED\n") if 
+    $connection->SUPER::send("122 PROBED\n") if
 	$connection->{out_buffer} eq "";
     $connection->{send_timer} = WEC->add_alarm($connection->{options}{SendPeriod}, sub { send_probe($connection) });
 }

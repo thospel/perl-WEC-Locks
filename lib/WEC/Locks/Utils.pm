@@ -25,4 +25,3 @@ sub check_options {
 	croak "Assertion: $name '$options->{$name}' is invalid but I have no clue why";
     }
 }
-

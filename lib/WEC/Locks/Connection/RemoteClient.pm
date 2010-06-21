@@ -142,7 +142,7 @@ sub server_chatter {
 
 sub drop_timers {
     my ($connection) = @_;
-    WEC->delete_alarm(delete $connection->{send_timer}) if 
+    WEC->delete_alarm(delete $connection->{send_timer}) if
 	$connection->{send_timer};
     WEC->delete_alarm(delete $connection->{receive_timer});
 }

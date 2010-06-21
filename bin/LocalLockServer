@@ -486,7 +486,7 @@ sub connect_fail {
     print STDERR "$operation to $destination failed: $status\n";
     if (%connections || !$terminating) {
 	print STDERR "Add_alarm\n";
-	$reconnect_alarm = 
+	$reconnect_alarm =
 	    WEC->add_alarm($client_reconnect_period, \&remote_connect);
     }
     $c_connection->drop_timers;
@@ -507,7 +507,7 @@ sub remote_closed {
 	print STDERR "Drop_alarm\n";
     } else {
 	print STDERR "Add_alarm\n";
-	$reconnect_alarm = 
+	$reconnect_alarm =
 	    WEC->add_alarm($client_reconnect_period, \&remote_connect);
     }
     $c_connection->drop_timers;
@@ -562,17 +562,17 @@ sub sync {
 	$c_connection->send("SYNCED $pending_to");
 	return;
     }
-    
+
     $c_connection->send("REPLACE");
     for my $name (sort keys %local_locks) {
 	my $local_locks = $local_locks{$name};
 	for my $local_lock (@$local_locks) {
-	    my $command = $local_lock->[L_ATOMIC] ? 
-		"REALOCK $local_lock->[L_ID] $name" : 
+	    my $command = $local_lock->[L_ATOMIC] ?
+		"REALOCK $local_lock->[L_ID] $name" :
 		"RELOCK $local_lock->[L_ID] $name";
 	    if ($local_lock->[L_FROM] || $local_lock->[L_TO] != INFINITY) {
 		$command .= " $local_lock->[L_FROM]";
-		$command .= " $local_lock->[L_TO]" if 
+		$command .= " $local_lock->[L_TO]" if
 		    $local_lock->[L_TO] != INFINITY;
 	    }
 	    $c_connection->send($command);
@@ -598,7 +598,7 @@ sub terminate {
     $terminating = 1;
     $server->accepting(0);
     for my $connection (values %connections) {
-	$connection->send("121 PLEASE TERMINATE") if 
+	$connection->send("121 PLEASE TERMINATE") if
 	    $connection->{out_handle};
     }
     if (!%connections) {
