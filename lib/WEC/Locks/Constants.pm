@@ -1,7 +1,7 @@
 package WEC::Locks::Constants;
 use 5.008;
-use warnings;
 use strict;
+use warnings;
 
 use Exporter::Tidy
     lock_types	=> [qw(LOCK_IMMEDIATE LOCK_DELAYED LOCK_QUERY LOCK_DROP)],

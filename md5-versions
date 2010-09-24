@@ -1,10 +1,10 @@
-# Generated on 2010-06-23 20:48:50 UT using /usr/local/bin/release_pm
+# Generated on 2010-09-24 12:49:05 UT using /usr/local/bin/release_pm
 BEGIN
 SEMANTICS	1.010
 DIGITS		3
 RELEASE		1.000
-DATE		2010-06-23 20:48:50
-VERSION	60bd77b0e6cbdd799a3d18ce141aed98 1.000 Changes
+DATE		2010-09-24 12:49:05
+VERSION	63e9356809d3385989dda95f6d2cf738 1.000 Changes
 VERSION	63f84bec79fc127a26ad47ac39f12889 1.000 Makefile.PL
 VERSION	2ce09386d26248d5111f87c8c82ccdd4 1.000 MANIFEST
 VERSION	ecfbaeabd53e8ad8cfabe9c1a022e35a 1.000 README
@@ -18,7 +18,7 @@ VERSION	5360e6054eb087f6677f6bcb6939e88e 1.000 lib/WEC/Locks/LocalServer.pm
 VERSION	005ad1e981caa9fc63a0f45f9bce801c 1.000 lib/WEC/Locks/RemoteClient.pm
 VERSION	a015fbffc9cfde1eba9424d47ae28ec5 1.000 lib/WEC/Locks/RemoteServer.pm
 VERSION	5c0a25fbffd8469e995166950094d892 1.000 lib/WEC/Locks/RemoteTransit.pm
-VERSION	a55e2dbd70457b57e3ac195bbc083e5f 1.000 lib/WEC/Locks/Constants.pm
+VERSION	7ed07c7515c13b39da1b58d0eb4b4921 1.000 lib/WEC/Locks/Constants.pm
 VERSION	3ef6f22cc61d25054a7347ac34d7fb41 1.000 lib/WEC/Locks/Utils.pm
 VERSION	cecbf32f2cdcd0b5fad4252368acd9aa 1.000 bin/LocalLockServer
 VERSION	4c2eb42d1f67d4df2c1a94c1b6c7e8f1 1.000 bin/RemoteLockServer
