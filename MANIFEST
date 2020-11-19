@@ -21,3 +21,4 @@ t/00_LocalServer.t
 t/00_RemoteClient.t
 t/00_RemoteServer.t
 md5-versions
+version_check
